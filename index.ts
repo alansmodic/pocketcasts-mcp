@@ -93,6 +93,7 @@ server.start({
   transportType: "httpStream",
   httpStream: {
     port,
+    host: "0.0.0.0",
     stateless: true,
   },
 });
