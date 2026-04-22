@@ -121,6 +121,16 @@ class PocketCastsClient {
     return this.authedPost("/user/new_releases");
   }
 
+  async getPodcastList() {
+    return this.authedPost("/user/podcast/list");
+  }
+
+  async checkTranscriptAvailability(podcastUuid: string, episodeUuid: string): Promise<{ available: boolean; types: string[] }> {
+    const transcripts = await this.getPodcastTranscript(podcastUuid, episodeUuid);
+    if (!transcripts || transcripts.length === 0) return { available: false, types: [] };
+    return { available: true, types: transcripts.map((t: any) => t.type) };
+  }
+
   async getEpisode(uuid: string) {
     const res = await fetch(
       `${PODCAST_API}/episode/show_notes/${uuid}`,
@@ -160,29 +170,67 @@ class PocketCastsClient {
     const body = await res.json();
 
     for (const episode of body.podcast.episodes) {
-      if(episode.uuid === episodeUuid) {
-        return episode.pocket_casts_transcripts
+      if (episode.uuid === episodeUuid) {
+        // Prefer Pocket Casts-generated transcripts, fall back to RSS-sourced ones
+        if (episode.pocket_casts_transcripts?.length) return episode.pocket_casts_transcripts;
+        if (episode.transcripts?.length) return episode.transcripts;
+        return null;
       }
+    }
+    return null;
+  }
+
+  private async transcribeWithAssemblyAI(audioUrl: string): Promise<string> {
+    const apiKey = process.env.ASSEMBLYAI_API_KEY;
+    if (!apiKey)
+      throw new Error(
+        "No transcript available and ASSEMBLYAI_API_KEY is not set. " +
+        "Set ASSEMBLYAI_API_KEY to enable transcription as a fallback."
+      );
+
+    console.error(`[AssemblyAI] Submitting transcription job...`);
+    const headers = { Authorization: apiKey, "Content-Type": "application/json" };
+
+    const submitRes = await fetch("https://api.assemblyai.com/v2/transcript", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ audio_url: audioUrl, speech_models: ["universal-2"] }),
+    });
+    if (!submitRes.ok) throw new Error(`AssemblyAI submit failed: ${submitRes.status} ${await submitRes.text()}`);
+    const { id } = await submitRes.json() as { id: string };
+
+    console.error(`[AssemblyAI] Waiting for transcript ${id}...`);
+    while (true) {
+      const pollRes = await fetch(`https://api.assemblyai.com/v2/transcript/${id}`, { headers });
+      if (!pollRes.ok) throw new Error(`AssemblyAI poll failed: ${pollRes.status}`);
+      const result = await pollRes.json() as { status: string; text?: string; error?: string };
+
+      if (result.status === "completed") return result.text!;
+      if (result.status === "error") throw new Error(`AssemblyAI error: ${result.error}`);
+
+      await Bun.sleep(3000);
     }
   }
 
-  async getTranscript(episodeUuid: string) {
+  async getTranscript(episodeUuid: string): Promise<string> {
     const episode: any = await this.getEpisodeDetails(episodeUuid);
-    console.log(episode)
 
-    if(!episode?.podcastUuid) {
+    if (!episode?.podcastUuid) {
       throw new Error(`Failed to fetch podcast UUID for episode ${episodeUuid}`);
     }
 
     const transcripts = await this.getPodcastTranscript(episode.podcastUuid, episode.uuid);
-    console.log(transcripts)
-    const vtt = transcripts?.find(
-      (t: any) => t.type === "text/vtt"
-    )?.url;
-    if (!vtt) throw new Error("No transcript available for this episode");
-    const res = await fetch(vtt, { headers: defaultHeaders });
-    if (!res.ok) throw new Error(`Failed to fetch transcript: ${res.status}`);
-    return res.text();
+    const vttUrl = transcripts?.find((t: any) => t.type === "text/vtt")?.url;
+
+    if (vttUrl) {
+      const res = await fetch(vttUrl, { headers: defaultHeaders });
+      if (!res.ok) throw new Error(`Failed to fetch transcript: ${res.status}`);
+      return res.text();
+    }
+
+    // No pre-made transcript — fall back to AssemblyAI
+    if (!episode.url) throw new Error("No audio URL available for transcription");
+    return this.transcribeWithAssemblyAI(episode.url);
   }
 }
 
