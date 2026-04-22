@@ -2,7 +2,7 @@ import { resolve } from "path";
 
 const API = "https://api.pocketcasts.com";
 const PODCAST_API = "https://podcast-api.pocketcasts.com";
-const AUTH_PATH = resolve(import.meta.dir, "auth.json");
+const AUTH_PATH = resolve(process.env.AUTH_DIR || import.meta.dir, "auth.json");
 
 const defaultHeaders: Record<string, string> = {
   "User-Agent":
@@ -30,14 +30,18 @@ class PocketCastsClient {
   }
 
   private async loadAuth(): Promise<boolean> {
-    // Prefer env vars (for Railway / hosted deploys)
-    if (process.env.POCKETCASTS_ACCESS_TOKEN && process.env.POCKETCASTS_REFRESH_TOKEN) {
-      this.accessToken = process.env.POCKETCASTS_ACCESS_TOKEN;
-      this.refreshTokenValue = process.env.POCKETCASTS_REFRESH_TOKEN;
-      this.expiresAt = parseInt(process.env.POCKETCASTS_EXPIRES_AT || "0", 10);
+    // 1. Try env vars (survive Railway redeploys)
+    const envToken = process.env.POCKETCASTS_ACCESS_TOKEN;
+    const envRefresh = process.env.POCKETCASTS_REFRESH_TOKEN;
+    const envExpires = process.env.POCKETCASTS_EXPIRES_AT;
+    if (envToken && envRefresh) {
+      this.accessToken = envToken;
+      this.refreshTokenValue = envRefresh;
+      this.expiresAt = envExpires ? parseInt(envExpires, 10) : 0;
       return true;
     }
-    // Fall back to local auth.json
+
+    // 2. Try local auth.json (survives process restarts, lost on redeploy without a volume)
     const file = Bun.file(AUTH_PATH);
     if (!(await file.exists())) return false;
     try {
@@ -52,10 +56,6 @@ class PocketCastsClient {
   }
 
   private async ensureAuth() {
-    // Try loading from disk if we have nothing in memory
-    if (!this.accessToken && !this.refreshTokenValue) {
-      await this.loadAuth();
-    }
     // Still valid
     if (this.accessToken && Date.now() < this.expiresAt) return;
     // Expired but we can refresh
@@ -63,8 +63,23 @@ class PocketCastsClient {
       await this.refresh();
       return;
     }
-    // No tokens at all
-    throw new Error("Not logged in. Run `bun run login` first.");
+    // Try loading from disk
+    if (await this.loadAuth()) {
+      if (this.accessToken && Date.now() < this.expiresAt) return;
+      if (this.refreshTokenValue) {
+        await this.refresh();
+        return;
+      }
+    }
+    // Login with email/password from env vars (Railway / hosted deploys)
+    const email = process.env.POCKETCASTS_EMAIL;
+    const password = process.env.POCKETCASTS_PASSWORD;
+    if (email && password) {
+      await this.login(email, password);
+      return;
+    }
+    // No way to authenticate
+    throw new Error("Not logged in. Run `bun run login` or set POCKETCASTS_EMAIL and POCKETCASTS_PASSWORD env vars.");
   }
 
   async login(email: string, password: string) {
