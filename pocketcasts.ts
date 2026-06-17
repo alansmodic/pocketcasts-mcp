@@ -1,8 +1,5 @@
-import { resolve } from "path";
-
 const API = "https://api.pocketcasts.com";
 const PODCAST_API = "https://podcast-api.pocketcasts.com";
-const AUTH_PATH = resolve(process.env.AUTH_DIR || import.meta.dir, "auth.json");
 
 const defaultHeaders: Record<string, string> = {
   "User-Agent":
@@ -10,76 +7,42 @@ const defaultHeaders: Record<string, string> = {
   Referer: "https://www.pocketcasts.com/",
 };
 
-type StoredAuth = {
+export type StoredAuth = {
   accessToken: string;
   refreshToken: string;
   expiresAt: number;
 };
 
-class PocketCastsClient {
-  private accessToken = "";
-  private refreshTokenValue = "";
-  private expiresAt = 0;
-  private async saveAuth() {
-    const data: StoredAuth = {
-      accessToken: this.accessToken,
-      refreshToken: this.refreshTokenValue,
-      expiresAt: this.expiresAt,
-    };
-    await Bun.write(AUTH_PATH, JSON.stringify(data, null, 2));
-  }
+/** What `authenticate` attaches to each MCP session and tools read from context. */
+export type Session = {
+  userId: string;
+  email: string;
+  client: PocketCastsClient;
+};
 
-  private async loadAuth(): Promise<boolean> {
-    // 1. Try env vars (survive Railway redeploys)
-    const envToken = process.env.POCKETCASTS_ACCESS_TOKEN;
-    const envRefresh = process.env.POCKETCASTS_REFRESH_TOKEN;
-    const envExpires = process.env.POCKETCASTS_EXPIRES_AT;
-    if (envToken && envRefresh) {
-      this.accessToken = envToken;
-      this.refreshTokenValue = envRefresh;
-      this.expiresAt = envExpires ? parseInt(envExpires, 10) : 0;
-      return true;
-    }
+/**
+ * One instance per user. Token state is injected (decrypted from the store) and
+ * an `onTokens` callback is invoked whenever the tokens change — on login and on
+ * auto-refresh — so the caller can re-encrypt and persist them to that user's row.
+ */
+export class PocketCastsClient {
+  constructor(
+    private tokens: StoredAuth,
+    private readonly onTokens: (tokens: StoredAuth) => Promise<void> = async () => {},
+  ) {}
 
-    // 2. Try local auth.json (survives process restarts, lost on redeploy without a volume)
-    const file = Bun.file(AUTH_PATH);
-    if (!(await file.exists())) return false;
-    try {
-      const data: StoredAuth = await file.json();
-      this.accessToken = data.accessToken;
-      this.refreshTokenValue = data.refreshToken;
-      this.expiresAt = data.expiresAt;
-      return true;
-    } catch {
-      return false;
-    }
+  /** Current token state — used by enrollment to capture tokens after login. */
+  get currentTokens(): StoredAuth {
+    return this.tokens;
   }
 
   private async ensureAuth() {
-    // Still valid
-    if (this.accessToken && Date.now() < this.expiresAt) return;
-    // Expired but we can refresh
-    if (this.refreshTokenValue) {
+    if (this.tokens.accessToken && Date.now() < this.tokens.expiresAt) return;
+    if (this.tokens.refreshToken) {
       await this.refresh();
       return;
     }
-    // Try loading from disk
-    if (await this.loadAuth()) {
-      if (this.accessToken && Date.now() < this.expiresAt) return;
-      if (this.refreshTokenValue) {
-        await this.refresh();
-        return;
-      }
-    }
-    // Login with email/password from env vars (Railway / hosted deploys)
-    const email = process.env.POCKETCASTS_EMAIL;
-    const password = process.env.POCKETCASTS_PASSWORD;
-    if (email && password) {
-      await this.login(email, password);
-      return;
-    }
-    // No way to authenticate
-    throw new Error("Not logged in. Run `bun run login` or set POCKETCASTS_EMAIL and POCKETCASTS_PASSWORD env vars.");
+    throw new Error("No valid Pocket Casts session. Please re-enroll to refresh your access.");
   }
 
   async login(email: string, password: string) {
@@ -90,10 +53,12 @@ class PocketCastsClient {
     });
     if (!res.ok) throw new Error(`Login failed: ${res.status}`);
     const data: any = await res.json();
-    this.accessToken = data.accessToken;
-    this.refreshTokenValue = data.refreshToken;
-    this.expiresAt = Date.now() + data.expiresIn * 1000;
-    await this.saveAuth();
+    this.tokens = {
+      accessToken: data.accessToken,
+      refreshToken: data.refreshToken,
+      expiresAt: Date.now() + data.expiresIn * 1000,
+    };
+    await this.onTokens(this.tokens);
   }
 
   private async refresh() {
@@ -102,29 +67,31 @@ class PocketCastsClient {
       headers: {
         ...defaultHeaders,
         "Content-Type": "application/json",
-        Authorization: `Bearer ${this.refreshTokenValue}`,
+        Authorization: `Bearer ${this.tokens.refreshToken}`,
       },
       body: JSON.stringify({
         grantType: "refresh_token",
-        refreshToken: this.refreshTokenValue,
+        refreshToken: this.tokens.refreshToken,
       }),
     });
     if (!res.ok) throw new Error(`Token refresh failed: ${res.status}`);
     const data: any = await res.json();
-    this.accessToken = data.accessToken;
-    this.refreshTokenValue = data.refreshToken;
-    this.expiresAt = Date.now() + data.expiresIn * 1000;
-    await this.saveAuth();
+    this.tokens = {
+      accessToken: data.accessToken,
+      refreshToken: data.refreshToken,
+      expiresAt: Date.now() + data.expiresIn * 1000,
+    };
+    await this.onTokens(this.tokens);
   }
 
-  private async authedPost(path: string, body?: unknown) {
+  private async authedPost(path: string, body?: unknown): Promise<any> {
     await this.ensureAuth();
     const res = await fetch(`${API}${path}`, {
       method: "POST",
       headers: {
         ...defaultHeaders,
         "Content-Type": "application/json",
-        Authorization: `Bearer ${this.accessToken}`,
+        Authorization: `Bearer ${this.tokens.accessToken}`,
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
@@ -165,7 +132,7 @@ class PocketCastsClient {
         headers: {
           ...defaultHeaders,
           "Content-Type": "application/json",
-          Authorization: `Bearer ${this.accessToken}`,
+          Authorization: `Bearer ${this.tokens.accessToken}`,
         },
         body: JSON.stringify({ uuid }),
       }
@@ -182,7 +149,7 @@ class PocketCastsClient {
     );
     if (!res.ok)
       throw new Error(`Failed to fetch podcast transcript ${podcastUuid}: ${res.status}`);
-    const body = await res.json();
+    const body: any = await res.json();
 
     for (const episode of body.podcast.episodes) {
       if (episode.uuid === episodeUuid) {
@@ -248,5 +215,3 @@ class PocketCastsClient {
     return this.transcribeWithAssemblyAI(episode.url);
   }
 }
-
-export const pocketcasts = new PocketCastsClient();

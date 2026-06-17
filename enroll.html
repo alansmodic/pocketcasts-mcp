@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Connect your Pocket Casts account</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    max-width: 30rem; margin: 3rem auto; padding: 0 1.25rem; line-height: 1.5;
+  }
+  h1 { font-size: 1.4rem; }
+  p.lede { color: #666; }
+  label { display: block; margin-top: 1rem; font-weight: 600; }
+  input {
+    width: 100%; padding: 0.6rem; margin-top: 0.35rem; font-size: 1rem;
+    border: 1px solid #bbb; border-radius: 0.5rem; box-sizing: border-box;
+  }
+  button {
+    margin-top: 1.5rem; width: 100%; padding: 0.75rem; font-size: 1rem; font-weight: 600;
+    border: 0; border-radius: 0.5rem; background: #d94b3b; color: #fff; cursor: pointer;
+  }
+  button:disabled { opacity: 0.6; cursor: progress; }
+  .note { font-size: 0.85rem; color: #777; margin-top: 1rem; }
+  .result, .error {
+    margin-top: 1.5rem; padding: 1rem; border-radius: 0.5rem; word-break: break-all;
+  }
+  .result { background: #eef7ee; border: 1px solid #bcdfbc; }
+  .error  { background: #fdecea; border: 1px solid #f5c2bd; }
+  code {
+    display: block; margin-top: 0.5rem; padding: 0.6rem; background: #00000010;
+    border-radius: 0.4rem; font-size: 0.9rem; user-select: all;
+    white-space: pre-wrap; word-break: break-all;
+  }
+  .result h2 { font-size: 1.05rem; margin: 1.5rem 0 0.5rem; }
+  .result details { margin-top: 0.75rem; }
+  .result summary { font-weight: 600; cursor: pointer; }
+  .result ol { padding-left: 1.2rem; margin: 0.5rem 0; }
+  .result p { margin: 0.5rem 0; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+  <h1>Connect your Pocket Casts account</h1>
+  <p class="lede">
+    Sign in once with your own Pocket Casts login. We use it to create a private
+    access token for you — your password is never stored.
+  </p>
+
+  <form id="form">
+    <label for="email">Pocket Casts email</label>
+    <input id="email" type="email" autocomplete="username" required />
+
+    <label for="password">Pocket Casts password</label>
+    <input id="password" type="password" autocomplete="current-password" required />
+
+    <button id="submit" type="submit">Connect account</button>
+  </form>
+
+  <p class="note">
+    Your email and password go straight to the server over HTTPS and are used only
+    to log in to Pocket Casts. We keep an encrypted session token, never your password.
+  </p>
+
+  <div id="result" class="result hidden">
+    <strong>You're connected.</strong> Here is your access token — copy it now.
+    You won't be able to see it again.
+    <code id="token"></code>
+
+    <h2>Add it to Claude</h2>
+
+    <details open>
+      <summary>Claude Desktop &amp; claude.ai (web/mobile)</summary>
+      <ol>
+        <li>Open <strong>Settings → Connectors</strong>, then click <strong>Add custom connector</strong>.</li>
+        <li>Name it something like <em>Pocket Casts</em>.</li>
+        <li>Paste this as the connector URL (your token is built in) and save:</li>
+      </ol>
+      <code id="connectorUrl"></code>
+    </details>
+
+    <details>
+      <summary>Claude Code (terminal)</summary>
+      <p>Run this command:</p>
+      <code id="cliCmd"></code>
+    </details>
+
+    <details>
+      <summary>Any other MCP client</summary>
+      <p>Point it at this URL:</p>
+      <code id="mcpUrl"></code>
+      <p>and send your token as an HTTP header:</p>
+      <code id="bearerHeader"></code>
+    </details>
+
+    <p class="note">Treat this token like a password — anyone who has it can read
+      your podcasts through this server. To revoke it, ask Claude to run the
+      <strong>delete-my-account</strong> tool, or come back and enroll again to get a fresh one.</p>
+  </div>
+
+  <div id="error" class="error hidden"></div>
+
+<script>
+  const form = document.getElementById("form");
+  const submit = document.getElementById("submit");
+  const resultBox = document.getElementById("result");
+  const tokenEl = document.getElementById("token");
+  const errorBox = document.getElementById("error");
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    errorBox.classList.add("hidden");
+    resultBox.classList.add("hidden");
+    submit.disabled = true;
+    submit.textContent = "Connecting…";
+
+    try {
+      const res = await fetch("/enroll", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: document.getElementById("email").value,
+          password: document.getElementById("password").value,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Enrollment failed.");
+
+      const origin = location.origin;
+      const token = data.bearer;
+      tokenEl.textContent = token;
+      // Connector UIs are URL-only, so carry the token in the api_key query param.
+      document.getElementById("connectorUrl").textContent = origin + "/mcp?api_key=" + token;
+      document.getElementById("cliCmd").textContent =
+        'claude mcp add --transport http pocketcasts ' + origin + '/mcp --header "Authorization: Bearer ' + token + '"';
+      document.getElementById("mcpUrl").textContent = origin + "/mcp";
+      document.getElementById("bearerHeader").textContent = "Authorization: Bearer " + token;
+
+      resultBox.classList.remove("hidden");
+      form.reset();
+    } catch (err) {
+      errorBox.textContent = err.message;
+      errorBox.classList.remove("hidden");
+    } finally {
+      submit.disabled = false;
+      submit.textContent = "Connect account";
+    }
+  });
+</script>
+</body>
+</html>
